@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spritesheet Spacer</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 1.1rem; margin: 0 0 12px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .panel { border: 1px solid #8884; border-radius: 10px; padding: 12px; }
+  .panel h2 { margin: 0 0 8px; font-size: 1rem; display: flex; justify-content: space-between; align-items: center; }
+  .panel small { opacity: 0.8; }
+  canvas { width: 100%; height: auto; image-rendering: pixelated; background: #1111; border-radius: 8px; display: block; }
+  .controls { margin-top: 16px; display: grid; gap: 10px; }
+  .slider { display: grid; grid-template-columns: 180px 1fr 60px; gap: 8px; align-items: center; }
+  input[type="range"] { width: 100%; }
+  .buttons { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  button, label.file {
+    border: 1px solid #8886; padding: 8px 12px; background: #fff2; border-radius: 8px; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  label.file input { display: none; }
+  .hint { font-size: 0.9rem; opacity: 0.85; }
+  .grid-legend { font-size: 0.85rem; opacity: 0.8; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <h1>Spritesheet Spacer</h1>
+
+  <div class="row">
+    <!-- Left: Source with grid overlay -->
+    <div class="panel">
+      <h2>
+        <span>Source</span>
+        <small>(paste image or upload)</small>
+      </h2>
+      <canvas id="sourceCanvas" width="512" height="512" aria-label="Source spritesheet with overlay grid"></canvas>
+      <div class="buttons">
+        <label class="file">
+          <input id="fileInput" type="file" accept="image/*" />
+          Upload image…
+        </label>
+        <button id="clearBtn" type="button">Clear</button>
+      </div>
+      <div class="grid-legend">Grid = semi-transparent yellow lines using the current “Input spacing” and “Y offset”.</div>
+    </div>
+
+    <!-- Right: Result with spacing -->
+    <div class="panel">
+      <h2>
+        <span>Result</span>
+        <small>(updates as you move sliders)</small>
+      </h2>
+      <canvas id="resultCanvas" width="512" height="512" aria-label="Result spritesheet with increased spacing"></canvas>
+      <div class="buttons">
+        <button id="copyBtn" type="button" disabled>Copy to clipboard</button>
+        <button id="downloadBtn" type="button" disabled>Download…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="panel controls" style="margin-top:16px;">
+    <div class="slider">
+      <label for="inSpacing">Input spacing (tile size px)</label>
+      <input id="inSpacing" type="range" min="1" max="512" step="1" value="16" />
+      <output id="inSpacingVal">16</output>
+    </div>
+
+    <div class="slider">
+      <label for="outSpacing">Output spacing (grid step px)</label>
+      <input id="outSpacing" type="range" min="1" max="1024" step="1" value="32" />
+      <output id="outSpacingVal">32</output>
+    </div>
+
+    <div class="slider">
+      <label for="yOffset">Y offset of first sprite (px from top)</label>
+      <input id="yOffset" type="range" min="0" max="511" step="1" value="0" />
+      <output id="yOffsetVal">0</output>
+    </div>
+
+    <div class="hint">
+      Assumptions: sprites are square (tile width = tile height = Input spacing). The Y offset aligns the
+      first sprite row in the source; output starts at top-left without offset. Sprites are not scaled; larger
+      “Output spacing” just adds padding between them.
+    </div>
+  </div>
+
+<script>
+(() => {
+  const sourceCanvas = document.getElementById('sourceCanvas');
+  const resultCanvas = document.getElementById('resultCanvas');
+  const sctx = sourceCanvas.getContext('2d');
+  const rctx = resultCanvas.getContext('2d');
+
+  const fileInput = document.getElementById('fileInput');
+  const clearBtn = document.getElementById('clearBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  const inSpacing = document.getElementById('inSpacing');
+  const outSpacing = document.getElementById('outSpacing');
+  const yOffset = document.getElementById('yOffset');
+
+  const inSpacingVal = document.getElementById('inSpacingVal');
+  const outSpacingVal = document.getElementById('outSpacingVal');
+  const yOffsetVal = document.getElementById('yOffsetVal');
+
+  let img = null; // HTMLImageElement or ImageBitmap
+  let imgW = 0, imgH = 0;
+
+  function setCanvasSize(c, w, h) {
+    c.width = Math.max(1, Math.floor(w));
+    c.height = Math.max(1, Math.floor(h));
+  }
+
+  function loadImageFromBlob(blob) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const image = new Image();
+      image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+      image.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      image.src = url;
+    });
+  }
+
+  async function useImage(image) {
+    img = image;
+    imgW = image.width;
+    imgH = image.height;
+    setCanvasSize(sourceCanvas, imgW, imgH);
+    drawSource();
+    rebuildResult();
+    copyBtn.disabled = false;
+    downloadBtn.disabled = false;
+  }
+
+  function clearAll() {
+    img = null;
+    setCanvasSize(sourceCanvas, 512, 512);
+    setCanvasSize(resultCanvas, 512, 512);
+    sctx.clearRect(0,0,sourceCanvas.width, sourceCanvas.height);
+    rctx.clearRect(0,0,resultCanvas.width, resultCanvas.height);
+    sctx.fillStyle = '#00000011';
+    sctx.fillRect(0,0,sourceCanvas.width, sourceCanvas.height);
+    rctx.fillStyle = '#00000011';
+    rctx.fillRect(0,0,resultCanvas.width, resultCanvas.height);
+    copyBtn.disabled = true;
+    downloadBtn.disabled = true;
+  }
+
+  function drawGrid(ctx, w, h, tile, yOff) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255, 255, 0, 0.6)';
+
+    // Vertical lines every tile px
+    ctx.beginPath();
+    for (let x = 0; x <= w; x += tile) {
+      ctx.moveTo(x + 0.5, 0);
+      ctx.lineTo(x + 0.5, h);
+    }
+    // Horizontal lines start at yOff
+    for (let y = yOff; y <= h; y += tile) {
+      ctx.moveTo(0, y + 0.5);
+      ctx.lineTo(w, y + 0.5);
+    }
+    ctx.stroke();
+
+    // Emphasize the first horizontal offset line
+    if (yOff > 0 && yOff < h) {
+      ctx.strokeStyle = 'rgba(255, 255, 0, 0.85)';
+      ctx.beginPath();
+      ctx.moveTo(0, yOff + 0.5);
+      ctx.lineTo(w, yOff + 0.5);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawSource() {
+    sctx.clearRect(0, 0, sourceCanvas.width, sourceCanvas.height);
+    if (!img) return;
+    sctx.drawImage(img, 0, 0);
+    // Overlay grid
+    const tile = Number(inSpacing.value);
+    const yOff = Number(yOffset.value);
+    drawGrid(sctx, imgW, imgH, tile, yOff);
+  }
+
+  function computeGrid() {
+    const tile = Number(inSpacing.value);
+    const yOff = Number(yOffset.value);
+
+    if (!img || tile <= 0) return { cols: 0, rows: 0, tile, yOff };
+
+    // Count columns: full tiles that fit across
+    const cols = Math.floor(imgW / tile);
+
+    // Count rows: start at yOff, then full tiles downward
+    const usableHeight = imgH - yOff;
+    const rows = usableHeight > 0 ? Math.floor(usableHeight / tile) : 0;
+
+    return { cols, rows, tile, yOff };
+  }
+
+  function rebuildResult() {
+    rctx.clearRect(0, 0, resultCanvas.width, resultCanvas.height);
+    if (!img) return;
+
+    const { cols, rows, tile, yOff } = computeGrid();
+    const step = Number(outSpacing.value);
+
+    // Output canvas size: grid step per tile (no output offset)
+    const outW = Math.max(1, cols * step);
+    const outH = Math.max(1, rows * step);
+    setCanvasSize(resultCanvas, outW, outH);
+    rctx.clearRect(0,0,outW,outH);
+
+    // Draw each tile without scaling (tile -> tile), spaced by 'step'
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const sx = c * tile;
+        const sy = yOff + r * tile;
+        if (sx + tile <= imgW && sy + tile <= imgH) {
+          const dx = c * step;
+          const dy = r * step;
+          rctx.drawImage(img, sx, sy, tile, tile, dx, dy, tile, tile);
+        }
+      }
+    }
+  }
+
+  // Sliders update
+  function syncSliderDisplays() {
+    inSpacingVal.value = inSpacing.value;
+    outSpacingVal.value = outSpacing.value;
+    yOffsetVal.value = yOffset.value;
+  }
+
+  function onSliderInput() {
+    // Keep yOffset within a sensible range (0..tile-1 or at least 0..511)
+    const tile = Number(inSpacing.value);
+    yOffset.max = String(Math.max(0, Math.min(2048, tile - 1))); // safe cap
+    if (Number(yOffset.value) > Number(yOffset.max)) {
+      yOffset.value = yOffset.max;
+    }
+    syncSliderDisplays();
+    drawSource();
+    rebuildResult();
+  }
+
+  // Paste handling (image/* from clipboard)
+  window.addEventListener('paste', async (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const blob = item.getAsFile();
+        try {
+          const image = await loadImageFromBlob(blob);
+          await useImage(image);
+        } catch (err) {
+          console.error('Paste load error:', err);
+        }
+        e.preventDefault();
+        break;
+      }
+    }
+  });
+
+  // File input
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const image = await loadImageFromBlob(file);
+      await useImage(image);
+    } catch (err) {
+      console.error('Upload load error:', err);
+    } finally {
+      fileInput.value = '';
+    }
+  });
+
+  // Clear
+  clearBtn.addEventListener('click', () => clearAll());
+
+  // Copy to clipboard
+  copyBtn.addEventListener('click', async () => {
+    try {
+      const blob = await new Promise(res => resultCanvas.toBlob(res, 'image/png'));
+      if (!blob) throw new Error('Failed to create PNG blob.');
+      if (navigator.clipboard && window.ClipboardItem) {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => copyBtn.textContent = 'Copy to clipboard', 1200);
+      } else {
+        // Fallback: open image in a new tab
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Copy failed in this browser. Try the Download button.');
+    }
+  });
+
+  // Download (with modern file picker if available)
+  downloadBtn.addEventListener('click', async () => {
+    try {
+      const blob = await new Promise(res => resultCanvas.toBlob(res, 'image/png'));
+      if (!blob) throw new Error('Failed to create PNG blob.');
+
+      if ('showSaveFilePicker' in window) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: 'spaced-sprites.png',
+          types: [{ description: 'PNG Image', accept: { 'image/png': ['.png'] } }]
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'spaced-sprites.png';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Download failed.');
+    }
+  });
+
+  // Slider events
+  [inSpacing, outSpacing, yOffset].forEach(el => {
+    el.addEventListener('input', onSliderInput);
+    el.addEventListener('change', onSliderInput);
+  });
+
+  // Initialize
+  clearAll();
+  syncSliderDisplays();
+})();
+</script>
+</body>
+</html>
